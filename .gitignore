@@ -73,3 +73,6 @@ desktop.ini
 
 # Project specific
 *.ico
+
+# Installer output
+installer_output/

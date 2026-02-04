@@ -34,6 +34,8 @@ A lightweight on-screen key display for tutorials and recordings. Shows pressed 
 
 ## Building the Executable
 
+### Option 1: Just the EXE
+
 To build a standalone `.exe` file:
 
 ```bash
@@ -41,6 +43,28 @@ python build_exe.py
 ```
 
 The executable will be created in the `dist` folder.
+
+### Option 2: Full Windows Installer (Recommended)
+
+To build a complete Windows installer with shortcuts, startup options, and uninstaller:
+
+1. **Install Inno Setup** (one-time setup):
+   - Download from [https://jrsoftware.org/isdl.php](https://jrsoftware.org/isdl.php)
+   - Install with default options
+
+2. **Build the installer**:
+   ```bash
+   python build_installer.py
+   ```
+
+3. The installer will be created in the `installer_output` folder as `KeyVisualizer_Setup_v1.0.0.exe`
+
+The installer will:
+- Install KeyVisualizer to Program Files
+- Create Start Menu shortcuts
+- Optionally create a Desktop shortcut
+- Optionally add to Windows startup
+- Create an uninstaller
 
 ## Usage
 
@@ -127,7 +151,7 @@ Quick theme presets available:
 
 ## License
 
-MIT License
+Apache License 2.0 - See LICENSE file for details
 
 ## Credits
 
