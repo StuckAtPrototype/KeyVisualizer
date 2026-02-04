@@ -32,10 +32,11 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QIcon, QPixmap, QImage, QPainter, QFont, QColor, QAction, QScreen,
-    QFontDatabase, QPainterPath, QBrush, QPen
+    QFontDatabase, QPainterPath, QBrush, QPen, QRadialGradient
 )
 
 from pynput import keyboard
+from pynput.mouse import Listener as MouseListener, Button
 
 
 # Key name mappings for display
@@ -252,6 +253,49 @@ class KeyboardListener(QObject):
         self.key_released.emit(key_name)
 
 
+# Display names for mouse buttons
+MOUSE_BUTTON_NAMES = {
+    Button.left: "Left Click",
+    Button.right: "Right Click",
+    Button.middle: "Middle Click",
+}
+
+
+class MouseClickListener(QObject):
+    """Listens for global mouse clicks and emits Qt signals."""
+    
+    # (button_name, screen_x, screen_y) for spot overlay
+    click_pressed = pyqtSignal(str, float, float)
+    click_released = pyqtSignal(str)
+    
+    def __init__(self):
+        super().__init__()
+        self._listener = None
+    
+    def start(self):
+        """Start listening for mouse clicks."""
+        if self._listener is not None:
+            return
+        self._listener = MouseListener(on_click=self._on_click)
+        self._listener.start()
+    
+    def stop(self):
+        """Stop listening."""
+        if self._listener:
+            self._listener.stop()
+            self._listener = None
+    
+    def _on_click(self, x, y, button, pressed):
+        """Called from pynput thread on click/release."""
+        name = MOUSE_BUTTON_NAMES.get(button)
+        if name is None:
+            return
+        if pressed:
+            self.click_pressed.emit(name, float(x), float(y))
+        else:
+            self.click_released.emit(name)
+
+
 class KeyBubble(QWidget):
     """Individual key bubble widget with fade animation."""
     
@@ -452,7 +496,29 @@ class KeyOverlay(QWidget):
     
     def update_position(self):
         """Position overlay based on configuration."""
-        screen = QApplication.primaryScreen()
+        # Get the selected screen
+        screen_selection = self.config.get('screen_selection', 'primary')
+        screens = QApplication.screens()
+        
+        if not screens:
+            return
+        
+        # Determine which screen to use
+        if screen_selection == 'primary':
+            screen = QApplication.primaryScreen()
+        elif screen_selection.startswith('screen_'):
+            # Extract screen index (e.g., 'screen_0' -> 0)
+            try:
+                screen_index = int(screen_selection.split('_')[1])
+                if 0 <= screen_index < len(screens):
+                    screen = screens[screen_index]
+                else:
+                    screen = QApplication.primaryScreen()  # Fallback
+            except (ValueError, IndexError):
+                screen = QApplication.primaryScreen()  # Fallback
+        else:
+            screen = QApplication.primaryScreen()  # Fallback
+        
         if not screen:
             return
         
@@ -633,6 +699,136 @@ class KeyOverlay(QWidget):
         self.layout_bubbles()
 
 
+def _default_click_spot_config() -> dict:
+    """Default config values for click spot (used when key missing)."""
+    return {
+        'click_spot_radius': 45,
+        'click_spot_fade_ms': 400,
+        'click_spot_color_left': '#6490ff',
+        'click_spot_color_right': '#ff7864',
+        'click_spot_color_middle': '#8cc88c',
+        'click_spot_opacity': 0.7,
+    }
+
+
+class ClickSpotOverlay(QWidget):
+    """Full-screen overlay that draws a gradient circle at each click position."""
+    
+    FADE_TICK_MS = 40
+    
+    def __init__(self, config: dict, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.spots: List[dict] = []
+        self._fade_timer = QTimer(self)
+        self._fade_timer.timeout.connect(self._tick_fade)
+        self.setup_ui()
+    
+    def update_config(self, config: dict):
+        """Update config (e.g. after settings change)."""
+        self.config = config
+    
+    def setup_ui(self):
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setGeometry(0, 0, 1, 1)  # Set by update_geometry()
+    
+    def update_geometry(self):
+        """Size and position to cover all screens (multi-monitor support)."""
+        screens = QApplication.screens()
+        if not screens:
+            return
+        
+        # Calculate bounding rectangle that covers all screens
+        min_x = min(s.geometry().x() for s in screens)
+        min_y = min(s.geometry().y() for s in screens)
+        max_x = max(s.geometry().x() + s.geometry().width() for s in screens)
+        max_y = max(s.geometry().y() + s.geometry().height() for s in screens)
+        
+        self.setGeometry(min_x, min_y, max_x - min_x, max_y - min_y)
+    
+    def add_spot(self, screen_x: float, screen_y: float, button_name: str):
+        """Add a gradient circle at the given screen position."""
+        import time
+        self.spots.append({
+            "x": screen_x,
+            "y": screen_y,
+            "alpha": 1.0,
+            "button_name": button_name,
+            "created_at": time.perf_counter(),
+        })
+        if not self._fade_timer.isActive():
+            self._fade_timer.start(self.FADE_TICK_MS)
+        self.update()
+    
+    def _tick_fade(self):
+        """Decay alpha for all spots and remove dead ones."""
+        import time
+        cfg = _default_click_spot_config()
+        cfg.update(self.config)
+        fade_ms = cfg.get('click_spot_fade_ms', 400)
+        now = time.perf_counter()
+        for s in self.spots:
+            elapsed_ms = (now - s["created_at"]) * 1000
+            s["alpha"] = max(0.0, 1.0 - elapsed_ms / fade_ms)
+        self.spots = [s for s in self.spots if s["alpha"] > 0.001]
+        if not self.spots:
+            self._fade_timer.stop()
+        self.update()
+    
+    def _spot_colors(self) -> dict:
+        """Resolve spot colors from config."""
+        cfg = _default_click_spot_config()
+        cfg.update(self.config)
+        return {
+            "Left Click": QColor(cfg.get('click_spot_color_left', '#6490ff')),
+            "Right Click": QColor(cfg.get('click_spot_color_right', '#ff7864')),
+            "Middle Click": QColor(cfg.get('click_spot_color_middle', '#8cc88c')),
+        }
+    
+    def paintEvent(self, event):
+        cfg = _default_click_spot_config()
+        cfg.update(self.config)
+        r = int(cfg.get('click_spot_radius', 45))
+        opacity = float(cfg.get('click_spot_opacity', 0.7))
+        spot_colors = self._spot_colors()
+        
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        
+        win_x = self.geometry().x()
+        win_y = self.geometry().y()
+        
+        for s in self.spots:
+            local_x = s["x"] - win_x
+            local_y = s["y"] - win_y
+            alpha = s["alpha"]
+            button_name = s.get("button_name", "Left Click")
+            
+            center_color = spot_colors.get(button_name, spot_colors["Left Click"])
+            center_color = QColor(center_color)
+            center_color.setAlphaF(alpha * opacity)
+            edge_color = QColor(center_color)
+            edge_color.setAlphaF(0.0)
+            
+            gradient = QRadialGradient(local_x, local_y, r, local_x, local_y)
+            gradient.setColorAt(0.0, center_color)
+            gradient.setColorAt(0.5, edge_color)
+            gradient.setColorAt(1.0, edge_color)
+            
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(gradient))
+            painter.drawEllipse(int(local_x - r), int(local_y - r), int(r * 2), int(r * 2))
+
+
 class SettingsDialog(QDialog):
     """Configuration dialog for KeyVisualizer."""
     
@@ -769,32 +965,52 @@ class SettingsDialog(QDialog):
         self.v_pos_combo.setCurrentIndex({'top': 0, 'bottom': 1}.get(current_v, 1))
         position_layout.addWidget(self.v_pos_combo, 0, 3)
         
+        # Screen selection (for multi-monitor setups)
+        position_layout.addWidget(QLabel("Screen:"), 1, 0)
+        self.screen_combo = QComboBox()
+        
+        # Populate with available screens
+        screens = QApplication.screens()
+        self.screen_combo.addItem("Primary Screen", "primary")
+        for i, screen in enumerate(screens):
+            screen_name = screen.name() if screen.name() else f"Screen {i + 1}"
+            self.screen_combo.addItem(f"{screen_name} ({screen.size().width()}x{screen.size().height()})", f"screen_{i}")
+        
+        # Set current selection
+        current_screen = self.config.get('screen_selection', 'primary')
+        for i in range(self.screen_combo.count()):
+            if self.screen_combo.itemData(i) == current_screen:
+                self.screen_combo.setCurrentIndex(i)
+                break
+        
+        position_layout.addWidget(self.screen_combo, 1, 1, 1, 3)  # Span 3 columns
+        
         # Margins
-        position_layout.addWidget(QLabel("Vertical Margin:"), 1, 0)
+        position_layout.addWidget(QLabel("Vertical Margin:"), 2, 0)
         self.margin_spin = QSpinBox()
         self.margin_spin.setRange(0, 500)
         self.margin_spin.setValue(self.config['margin_bottom'])
-        position_layout.addWidget(self.margin_spin, 1, 1)
+        position_layout.addWidget(self.margin_spin, 2, 1)
         
-        position_layout.addWidget(QLabel("Horizontal Offset:"), 1, 2)
+        position_layout.addWidget(QLabel("Horizontal Offset:"), 2, 2)
         self.h_margin_spin = QSpinBox()
         self.h_margin_spin.setRange(-500, 500)
         self.h_margin_spin.setValue(self.config.get('margin_horizontal', 0))
-        position_layout.addWidget(self.h_margin_spin, 1, 3)
+        position_layout.addWidget(self.h_margin_spin, 2, 3)
         
         # Size settings (overlay height auto-adjusts with font size)
-        position_layout.addWidget(QLabel("Min Height:"), 2, 0)
+        position_layout.addWidget(QLabel("Min Height:"), 3, 0)
         self.height_spin = QSpinBox()
         self.height_spin.setRange(40, 300)
         self.height_spin.setValue(self.config['overlay_height'])
         self.height_spin.setToolTip("Minimum overlay height (auto-adjusts based on font size)")
-        position_layout.addWidget(self.height_spin, 2, 1)
+        position_layout.addWidget(self.height_spin, 3, 1)
         
-        position_layout.addWidget(QLabel("Bubble Spacing:"), 2, 2)
+        position_layout.addWidget(QLabel("Bubble Spacing:"), 3, 2)
         self.spacing_spin = QSpinBox()
         self.spacing_spin.setRange(2, 50)
         self.spacing_spin.setValue(self.config['bubble_spacing'])
-        position_layout.addWidget(self.spacing_spin, 2, 3)
+        position_layout.addWidget(self.spacing_spin, 3, 3)
         
         behavior_layout.addWidget(position_group)
         
@@ -863,6 +1079,67 @@ class SettingsDialog(QDialog):
         presets_layout.addStretch()
         
         tabs.addTab(presets_tab, "Presets")
+        
+        # Click Spot tab
+        click_spot_tab = QWidget()
+        click_spot_layout = QVBoxLayout(click_spot_tab)
+        
+        click_spot_group = QGroupBox("Click spot (circle at click position)")
+        cs_layout = QGridLayout(click_spot_group)
+        
+        self.show_click_spot_cb = QCheckBox("Show click spot")
+        self.show_click_spot_cb.setChecked(self.config.get('show_click_spot', True))
+        cs_layout.addWidget(self.show_click_spot_cb, 0, 0, 1, 2)
+        
+        cs_layout.addWidget(QLabel("Radius:"), 1, 0)
+        self.click_spot_radius_spin = QSpinBox()
+        self.click_spot_radius_spin.setRange(10, 120)
+        self.click_spot_radius_spin.setValue(self.config.get('click_spot_radius', 45))
+        cs_layout.addWidget(self.click_spot_radius_spin, 1, 1)
+        
+        cs_layout.addWidget(QLabel("Fade (ms):"), 1, 2)
+        self.click_spot_fade_spin = QSpinBox()
+        self.click_spot_fade_spin.setRange(100, 1500)
+        self.click_spot_fade_spin.setValue(self.config.get('click_spot_fade_ms', 400))
+        self.click_spot_fade_spin.setSuffix(" ms")
+        cs_layout.addWidget(self.click_spot_fade_spin, 1, 3)
+        
+        cs_layout.addWidget(QLabel("Center opacity:"), 2, 0)
+        self.click_spot_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.click_spot_opacity_slider.setRange(10, 100)
+        self.click_spot_opacity_slider.setValue(int(self.config.get('click_spot_opacity', 0.7) * 100))
+        cs_layout.addWidget(self.click_spot_opacity_slider, 2, 1)
+        self.click_spot_opacity_label = QLabel(f"{self.config.get('click_spot_opacity', 0.7):.2f}")
+        self.click_spot_opacity_slider.valueChanged.connect(
+            lambda v: self.click_spot_opacity_label.setText(f"{v/100:.2f}")
+        )
+        cs_layout.addWidget(self.click_spot_opacity_label, 2, 2)
+        
+        cs_layout.addWidget(QLabel("Left click color:"), 3, 0)
+        self.click_spot_left_btn = QPushButton()
+        self.click_spot_left_btn.setFixedSize(80, 28)
+        self.update_color_button(self.click_spot_left_btn, self.config.get('click_spot_color_left', '#6490ff'))
+        self.click_spot_left_btn.clicked.connect(lambda: self.pick_color('click_spot_color_left', self.click_spot_left_btn))
+        cs_layout.addWidget(self.click_spot_left_btn, 3, 1)
+        
+        cs_layout.addWidget(QLabel("Right click color:"), 3, 2)
+        self.click_spot_right_btn = QPushButton()
+        self.click_spot_right_btn.setFixedSize(80, 28)
+        self.update_color_button(self.click_spot_right_btn, self.config.get('click_spot_color_right', '#ff7864'))
+        self.click_spot_right_btn.clicked.connect(lambda: self.pick_color('click_spot_color_right', self.click_spot_right_btn))
+        cs_layout.addWidget(self.click_spot_right_btn, 3, 3)
+        
+        cs_layout.addWidget(QLabel("Middle click color:"), 4, 0)
+        self.click_spot_middle_btn = QPushButton()
+        self.click_spot_middle_btn.setFixedSize(80, 28)
+        self.update_color_button(self.click_spot_middle_btn, self.config.get('click_spot_color_middle', '#8cc88c'))
+        self.click_spot_middle_btn.clicked.connect(lambda: self.pick_color('click_spot_color_middle', self.click_spot_middle_btn))
+        cs_layout.addWidget(self.click_spot_middle_btn, 4, 1)
+        
+        click_spot_layout.addWidget(click_spot_group)
+        click_spot_layout.addStretch()
+        
+        tabs.addTab(click_spot_tab, "Click Spot")
         
         layout.addWidget(tabs)
         
@@ -970,6 +1247,14 @@ class SettingsDialog(QDialog):
             'autostart': self.autostart_cb.isChecked(),
             'position_horizontal': self.h_pos_combo.currentData(),
             'position_vertical': self.v_pos_combo.currentData(),
+            'screen_selection': self.screen_combo.currentData(),
+            'show_click_spot': self.show_click_spot_cb.isChecked(),
+            'click_spot_radius': self.click_spot_radius_spin.value(),
+            'click_spot_fade_ms': self.click_spot_fade_spin.value(),
+            'click_spot_color_left': self.config.get('click_spot_color_left', '#6490ff'),
+            'click_spot_color_right': self.config.get('click_spot_color_right', '#ff7864'),
+            'click_spot_color_middle': self.config.get('click_spot_color_middle', '#8cc88c'),
+            'click_spot_opacity': self.click_spot_opacity_slider.value() / 100.0,
         }
 
 
@@ -1021,6 +1306,15 @@ class KeyVisualizerApp(QSystemTrayIcon):
         'autostart': False,
         'position_horizontal': 'center',  # left, center, right
         'position_vertical': 'bottom',    # top, bottom
+        'screen_selection': 'primary',     # 'primary', 'screen_0', 'screen_1', etc.
+        # Click spot overlay (circle at click position)
+        'show_click_spot': True,
+        'click_spot_radius': 45,
+        'click_spot_fade_ms': 400,
+        'click_spot_color_left': '#6490ff',
+        'click_spot_color_right': '#ff7864',
+        'click_spot_color_middle': '#8cc88c',
+        'click_spot_opacity': 0.7,
     }
     
     def __init__(self):
@@ -1033,21 +1327,32 @@ class KeyVisualizerApp(QSystemTrayIcon):
         # State
         self.is_active = True
         self.keyboard_listener = KeyboardListener()
+        self.mouse_listener = MouseClickListener()
         
-        # Create overlay
+        # Create overlays
         self.overlay = KeyOverlay(self.config)
+        self.click_spot_overlay = ClickSpotOverlay(self.config)
+        self.click_spot_overlay.update_geometry()
         
         # Setup UI
         self.setup_tray()
         
-        # Connect signals
+        # Connect keyboard signals
         self.keyboard_listener.key_pressed.connect(self.on_key_pressed)
         self.keyboard_listener.key_released.connect(self.on_key_released)
         self.keyboard_listener.combo_pressed.connect(self.on_combo_pressed)
         
-        # Start listening
+        # Connect mouse signals
+        self.mouse_listener.click_pressed.connect(self.on_click_pressed)
+        self.mouse_listener.click_released.connect(self.on_click_released)
+        
+        # Start listening (show click spot first so key overlay stays on top)
         self.keyboard_listener.start()
+        self.mouse_listener.start()
+        if self.config.get('show_click_spot', True):
+            self.click_spot_overlay.show()
         self.overlay.show()
+        self.overlay.raise_()
     
     def load_config(self) -> dict:
         """Load configuration from settings."""
@@ -1070,7 +1375,7 @@ class KeyVisualizerApp(QSystemTrayIcon):
     def setup_tray(self):
         """Setup system tray icon and menu."""
         self.setIcon(create_tray_icon())
-        self.setToolTip("KeyVisualizer - Click to toggle")
+        self.setToolTip("KeyVisualizer - Right-click for menu")
         
         # Create menu - store as instance variable to prevent garbage collection
         self.menu = QMenu()
@@ -1108,10 +1413,8 @@ class KeyVisualizerApp(QSystemTrayIcon):
         self.activated.connect(self.on_activated)
     
     def on_activated(self, reason):
-        """Handle tray icon clicks."""
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.toggle_active()
-        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        """Handle tray icon clicks (double-click opens settings; single-click does nothing)."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.show_settings()
     
     def toggle_active(self):
@@ -1119,15 +1422,19 @@ class KeyVisualizerApp(QSystemTrayIcon):
         self.is_active = not self.is_active
         
         if self.is_active:
+            if self.config.get('show_click_spot', True):
+                self.click_spot_overlay.show()
             self.overlay.show()
+            self.overlay.raise_()
             self.toggle_action.setText("Pause")
             self.status_action.setText("Active")
-            self.setToolTip("KeyVisualizer - Active\nClick to pause")
+            self.setToolTip("KeyVisualizer - Active\nRight-click for menu")
         else:
             self.overlay.hide()
+            self.click_spot_overlay.hide()
             self.toggle_action.setText("Resume")
             self.status_action.setText("Paused")
-            self.setToolTip("KeyVisualizer - Paused\nClick to resume")
+            self.setToolTip("KeyVisualizer - Paused\nRight-click for menu")
     
     def on_key_pressed(self, key_name: str):
         """Handle key press event."""
@@ -1145,6 +1452,18 @@ class KeyVisualizerApp(QSystemTrayIcon):
             # Remove individual modifier bubbles and show the combo instead
             self.overlay.show_combo(combo)
     
+    def on_click_pressed(self, button_name: str, x: float, y: float):
+        """Handle mouse click (Left Click, Right Click, etc.)."""
+        if self.is_active:
+            self.overlay.add_key(button_name)
+            if self.config.get('show_click_spot', True):
+                self.click_spot_overlay.add_spot(x, y, button_name)
+    
+    def on_click_released(self, button_name: str):
+        """Handle mouse release."""
+        if self.is_active:
+            self.overlay.release_key(button_name)
+    
     def show_settings(self):
         """Show settings dialog."""
         dialog = SettingsDialog(self.config)
@@ -1153,6 +1472,14 @@ class KeyVisualizerApp(QSystemTrayIcon):
             self.config = dialog.get_config()
             self.save_config()
             self.overlay.update_config(self.config)
+            self.click_spot_overlay.update_config(self.config)
+            
+            # Show/hide click spot overlay based on setting
+            if self.config.get('show_click_spot', True):
+                if self.is_active:
+                    self.click_spot_overlay.show()
+            else:
+                self.click_spot_overlay.hide()
             
             # Handle autostart
             if self.config.get('autostart'):
@@ -1218,7 +1545,9 @@ class KeyVisualizerApp(QSystemTrayIcon):
     def quit_app(self):
         """Clean shutdown."""
         self.keyboard_listener.stop()
+        self.mouse_listener.stop()
         self.overlay.hide()
+        self.click_spot_overlay.hide()
         self.save_config()
         QApplication.quit()
 
