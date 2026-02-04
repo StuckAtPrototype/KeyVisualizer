@@ -78,6 +78,8 @@ def build_exe():
         "PyQt6.QtGui",
         "pynput.keyboard",
         "pynput.keyboard._win32",
+        "pynput.mouse",
+        "pynput.mouse._win32",
         "pynput._util",
         "pynput._util.win32",
     ]
