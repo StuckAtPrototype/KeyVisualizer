@@ -57,7 +57,7 @@ To build a complete Windows installer with shortcuts, startup options, and unins
    python build_installer.py
    ```
 
-3. The installer will be created in the `installer_output` folder as `KeyVisualizer_Setup_v1.0.0.exe`
+3. The installer will be created in the `installer_output` folder as `KeyVisualizer_Setup_v1.0.2.exe`
 
 The installer will:
 - Install KeyVisualizer to Program Files

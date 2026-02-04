@@ -2,7 +2,7 @@
 ; Creates a Windows installer for KeyVisualizer
 
 #define MyAppName "KeyVisualizer"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "StuckAtPrototype"
 #define MyAppURL "https://github.com/stuckatprototype/keyvisualizer"
 #define MyAppExeName "KeyVisualizer.exe"

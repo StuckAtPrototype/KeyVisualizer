@@ -3,7 +3,7 @@ KeyVisualizer - On-screen key display for tutorials and recordings
 A lightweight overlay that shows pressed keys at the bottom of the screen.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 __app_name__ = "KeyVisualizer"
 
 import sys
