@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QSettings, QPoint, QPropertyAnimation, QEasingCurve,
-    QRect, pyqtSignal, QObject
+    QRect, QRectF, pyqtSignal, QObject
 )
 from PyQt6.QtGui import (
     QIcon, QPixmap, QImage, QPainter, QFont, QColor, QAction, QScreen,
@@ -269,6 +269,7 @@ class KeyBubble(QWidget):
     
     def calculate_size(self):
         """Calculate bubble size based on text and config."""
+        # Get font metrics
         font = QFont(self.config['font_family'], self.config['font_size'])
         font.setBold(self.config['font_bold'])
         
@@ -277,42 +278,118 @@ class KeyBubble(QWidget):
         text_width = fm.horizontalAdvance(self.key_text)
         text_height = fm.height()
         
-        padding = self.config['padding']
-        min_width = self.config['min_bubble_width']
+        # Get config values
+        font_size = self.config.get('font_size', 24)
+        padding = self.config.get('padding', 15)
+        min_width = self.config.get('min_bubble_width', 55)
+        border_width = self.config['border_width'] if self.config.get('show_border', True) else 0
         
-        width = max(text_width + padding * 2, min_width)
-        height = text_height + padding * 2
+        # Add padding around text
+        content_width = text_width + (padding * 2)
+        content_height = text_height + (padding * 2)
+        
+        # Ensure minimum height based on font size (font size * 2.2 is a good minimum)
+        min_height = int(font_size * 2.2)
+        content_height = max(content_height, min_height)
+        
+        # Add border space (border draws centered, so we need full width on each side)
+        border_space = border_width + 2  # Add 2px margin for clean rendering
+        
+        # Calculate base dimensions
+        width = max(content_width, min_width) + border_space
+        height = content_height + border_space
+        
+        # For single characters, make it square-ish (slightly wider than tall)
+        if len(self.key_text) == 1:
+            # Use the larger dimension as the base
+            target_size = max(width, height)
+            width = target_size
+            height = int(target_size * 0.95)  # Slightly shorter to look better
+        # For short text (2-3 chars), ensure reasonable proportions
+        elif len(self.key_text) <= 3:
+            # Don't let it get too tall and narrow
+            if height > width * 1.3:
+                height = int(width * 1.3)
         
         self.setFixedSize(int(width), int(height))
     
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.setOpacity(self.opacity)
         
-        # Draw background
+        # Get config values
         bg_color = QColor(self.config['bg_color'])
         border_color = QColor(self.config['border_color'])
         text_color = QColor(self.config['text_color'])
+        border_width = float(self.config['border_width']) if self.config['show_border'] else 0.0
+        radius = float(self.config['border_radius'])
         
-        rect = self.rect().adjusted(1, 1, -1, -1)
-        radius = self.config['border_radius']
+        # Calculate inset for border (border is drawn centered on the edge)
+        inset = (border_width / 2.0) + 1.0
         
-        # Background
-        painter.setBrush(QBrush(bg_color))
-        if self.config['show_border']:
-            painter.setPen(QPen(border_color, self.config['border_width']))
+        # Create float rect for smooth rendering
+        w = float(self.width())
+        h = float(self.height())
+        
+        x = inset
+        y = inset
+        rect_w = w - (inset * 2)
+        rect_h = h - (inset * 2)
+        
+        # Ensure radius is reasonable (not larger than half of smallest dimension)
+        max_radius = min(rect_w, rect_h) / 2.0
+        r = min(radius, max_radius)
+        
+        # Build path for rounded rectangle manually for maximum control
+        path = QPainterPath()
+        
+        # Start at top-left, after the curve
+        path.moveTo(x + r, y)
+        
+        # Top edge to top-right corner
+        path.lineTo(x + rect_w - r, y)
+        # Top-right corner arc
+        path.arcTo(x + rect_w - 2*r, y, 2*r, 2*r, 90, -90)
+        
+        # Right edge to bottom-right corner
+        path.lineTo(x + rect_w, y + rect_h - r)
+        # Bottom-right corner arc
+        path.arcTo(x + rect_w - 2*r, y + rect_h - 2*r, 2*r, 2*r, 0, -90)
+        
+        # Bottom edge to bottom-left corner
+        path.lineTo(x + r, y + rect_h)
+        # Bottom-left corner arc
+        path.arcTo(x, y + rect_h - 2*r, 2*r, 2*r, -90, -90)
+        
+        # Left edge to top-left corner
+        path.lineTo(x, y + r)
+        # Top-left corner arc
+        path.arcTo(x, y, 2*r, 2*r, 180, -90)
+        
+        path.closeSubpath()
+        
+        # Set up pen for border
+        if self.config['show_border'] and border_width > 0:
+            pen = QPen(border_color, border_width)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
         else:
             painter.setPen(Qt.PenStyle.NoPen)
         
-        painter.drawRoundedRect(rect, radius, radius)
+        # Set brush for fill
+        painter.setBrush(QBrush(bg_color))
         
-        # Text
+        # Draw the path
+        painter.drawPath(path)
+        
+        # Draw text centered
         font = QFont(self.config['font_family'], self.config['font_size'])
         font.setBold(self.config['font_bold'])
         painter.setFont(font)
         painter.setPen(text_color)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.key_text)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.key_text)
 
 
 class KeyOverlay(QWidget):
@@ -341,9 +418,37 @@ class KeyOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         
-        # Set size
-        self.setFixedHeight(self.config['overlay_height'])
+        # Set size - height will auto-adjust based on font
         self.setMinimumWidth(400)
+        self.update_height()
+    
+    def calculate_required_height(self) -> int:
+        """Calculate the minimum overlay height needed for current font size."""
+        font_size = self.config.get('font_size', 24)
+        padding = self.config.get('padding', 15)
+        border_width = self.config.get('border_width', 3) if self.config.get('show_border', True) else 0
+        
+        # Calculate bubble height: font height + padding + border + margins
+        # Font height is approximately 1.4x font size
+        font_height = int(font_size * 1.4)
+        bubble_height = font_height + (padding * 2) + (border_width * 2) + 4
+        
+        # For single characters, we make bubbles square-ish, so use max dimension
+        min_bubble_size = int(font_size * 2.2)
+        bubble_height = max(bubble_height, min_bubble_size)
+        
+        # Add vertical margin (space above and below the bubble)
+        vertical_margin = 10
+        
+        return bubble_height + (vertical_margin * 2)
+    
+    def update_height(self):
+        """Update overlay height based on font size."""
+        required_height = self.calculate_required_height()
+        # Use the larger of calculated height or configured minimum
+        min_height = self.config.get('overlay_height', 80)
+        actual_height = max(required_height, min_height)
+        self.setFixedHeight(actual_height)
     
     def update_position(self):
         """Position overlay based on configuration."""
@@ -375,7 +480,7 @@ class KeyOverlay(QWidget):
         if v_pos == 'top':
             y = geometry.y() + v_margin
         else:  # bottom
-            y = geometry.y() + geometry.height() - self.config['overlay_height'] - v_margin
+            y = geometry.y() + geometry.height() - self.height() - v_margin
         
         self.move(int(x), int(y))
     
@@ -510,7 +615,7 @@ class KeyOverlay(QWidget):
     def update_config(self, config: dict):
         """Update configuration and refresh display."""
         self.config = config
-        self.setFixedHeight(config['overlay_height'])
+        self.update_height()  # Auto-adjust height based on font size
         self.update_position()
         
         # Clear existing bubbles
@@ -622,7 +727,7 @@ class SettingsDialog(QDialog):
         
         size_layout.addWidget(QLabel("Border Radius:"), 1, 0)
         self.radius_spin = QSpinBox()
-        self.radius_spin.setRange(0, 30)
+        self.radius_spin.setRange(0, 100)  # Allow larger radius for big fonts
         self.radius_spin.setValue(self.config['border_radius'])
         size_layout.addWidget(self.radius_spin, 1, 1)
         
@@ -677,11 +782,12 @@ class SettingsDialog(QDialog):
         self.h_margin_spin.setValue(self.config.get('margin_horizontal', 0))
         position_layout.addWidget(self.h_margin_spin, 1, 3)
         
-        # Size settings
-        position_layout.addWidget(QLabel("Overlay Height:"), 2, 0)
+        # Size settings (overlay height auto-adjusts with font size)
+        position_layout.addWidget(QLabel("Min Height:"), 2, 0)
         self.height_spin = QSpinBox()
-        self.height_spin.setRange(40, 200)
+        self.height_spin.setRange(40, 300)
         self.height_spin.setValue(self.config['overlay_height'])
+        self.height_spin.setToolTip("Minimum overlay height (auto-adjusts based on font size)")
         position_layout.addWidget(self.height_spin, 2, 1)
         
         position_layout.addWidget(QLabel("Bubble Spacing:"), 2, 2)
@@ -899,16 +1005,16 @@ class KeyVisualizerApp(QSystemTrayIcon):
         'border_color': '#555555',
         'show_border': True,
         'font_family': 'Segoe UI',
-        'font_size': 18,
+        'font_size': 20,
         'font_bold': True,
-        'padding': 12,
-        'min_bubble_width': 50,
-        'border_radius': 8,
-        'border_width': 2,
-        'overlay_height': 60,
+        'padding': 15,
+        'min_bubble_width': 55,
+        'border_radius': 25,
+        'border_width': 3,
+        'overlay_height': 80,
         'margin_bottom': 50,
         'margin_horizontal': 0,
-        'bubble_spacing': 8,
+        'bubble_spacing': 10,
         'fade_speed': 0.5,
         'max_keys': 10,
         'start_minimized': True,
@@ -984,6 +1090,11 @@ class KeyVisualizerApp(QSystemTrayIcon):
         self.settings_action.triggered.connect(self.show_settings)
         self.menu.addAction(self.settings_action)
         
+        # Reset to defaults option
+        self.reset_action = QAction("Reset to Defaults")
+        self.reset_action.triggered.connect(self.reset_to_defaults)
+        self.menu.addAction(self.reset_action)
+        
         self.menu.addSeparator()
         
         # Store as instance variable to prevent garbage collection
@@ -1048,6 +1159,29 @@ class KeyVisualizerApp(QSystemTrayIcon):
                 self.enable_autostart()
             else:
                 self.disable_autostart()
+    
+    def reset_to_defaults(self):
+        """Reset all settings to default values."""
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            None,
+            "Reset to Defaults",
+            "This will reset all settings to their default values. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Reset to default config
+            self.config = self.DEFAULT_CONFIG.copy()
+            self.save_config()
+            self.overlay.update_config(self.config)
+            
+            QMessageBox.information(
+                None,
+                "Reset Complete",
+                "Settings have been reset to defaults."
+            )
     
     def enable_autostart(self):
         """Add to Windows startup."""
